@@ -2,14 +2,17 @@ import React from 'react';
 import { Image, StyleSheet, Text, View } from 'react-native';
 import type { Track } from 'react-native-track-player';
 
-export interface TrackInfoProps {
+export const TrackInfo: React.FC<{
   track?: Track;
-}
+}> = ({ track }) => {
+  // TODO: properly fix type
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore
+  const imageUri = track?.artwork?.uri || track?.artwork;
 
-export const TrackInfo: React.FC<TrackInfoProps> = ({ track }) => {
   return (
     <View style={styles.container}>
-      <Image style={styles.artwork} source={{ uri: `${track?.artwork}` }} />
+      <Image style={styles.artwork} source={{ uri: imageUri }} />
       <Text style={styles.titleText}>{track?.title}</Text>
       <Text style={styles.artistText}>{track?.artist}</Text>
     </View>
@@ -21,9 +24,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   artwork: {
-    width: 240,
-    height: 240,
-    marginTop: 30,
+    width: '60%',
+    aspectRatio: 1,
+    marginTop: '2%',
     backgroundColor: 'grey',
   },
   titleText: {

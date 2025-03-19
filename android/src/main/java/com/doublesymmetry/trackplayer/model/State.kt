@@ -1,11 +1,13 @@
 package com.doublesymmetry.trackplayer.model
 
 enum class State(val state: String) {
-    Idle("idle"),
+    Buffering("buffering"),
+    None("none"),
     Ready("ready"),
-    Playing("playing"),
     Paused("paused"),
     Stopped("stopped"),
-    Buffering("buffering"),
-    Connecting("connecting"),
+    Playing("playing"),
+    Loading("loading"),
+    Error("error"),
+    Ended("ended"),
 }

@@ -83,7 +83,7 @@ export const useTrackProgress = (id: string | number): number => {
 #### 2. Listen To Progress Updates
 
 Next we need to set up a listener for progress updates in our
-[playback service](../basics/playback-service.md) and update our zustonad store:
+[playback service](../basics/playback-service.md) and update our zustand store:
 
 ```ts
 // src/services/PlaybackService.ts
@@ -105,7 +105,7 @@ export const PlaybackService = async function() {
 ```
 
 :warning: make sure you've configured your `progressUpdateEventInterval`
-in the `TrackPlayer.setupPlayer` call.
+in the `TrackPlayer.updateOptions` call.
 
 #### 3. Reactively Update Progress
 

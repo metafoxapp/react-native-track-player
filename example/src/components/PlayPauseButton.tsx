@@ -1,48 +1,40 @@
 import React from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
-import { State, usePlaybackState } from 'react-native-track-player';
-import { useOnTogglePlayback } from '../hooks';
-import { useDebouncedValue } from '../hooks/useDebouncedValue';
-
-import { Button } from './Button';
+import {
+  ActivityIndicator,
+  StyleSheet,
+  TouchableWithoutFeedback,
+  View,
+} from 'react-native';
+import TrackPlayer, { useIsPlaying } from 'react-native-track-player';
+import FontAwesome6 from 'react-native-vector-icons/FontAwesome6';
 
 export const PlayPauseButton: React.FC = () => {
-  const state = usePlaybackState();
-  const isPlaying = state === State.Playing;
-  const isLoading = useDebouncedValue(
-    state === State.Connecting || state === State.Buffering,
-    250
-  );
-
-  const onTogglePlayback = useOnTogglePlayback();
-
-  if (isLoading) {
-    return (
-      <View style={styles.statusContainer}>
-        {isLoading && <ActivityIndicator />}
-      </View>
-    );
-  }
+  const { playing, bufferingDuringPlay } = useIsPlaying();
 
   return (
-    <Button
-      title={isPlaying ? 'Pause' : 'Play'}
-      onPress={onTogglePlayback}
-      type="primary"
-      style={styles.playPause}
-    />
+    <View style={styles.container}>
+      {bufferingDuringPlay ? (
+        <ActivityIndicator />
+      ) : (
+        <TouchableWithoutFeedback
+          onPress={playing ? TrackPlayer.pause : TrackPlayer.play}
+        >
+          <FontAwesome6
+            name={playing ? 'pause' : 'play'}
+            size={48}
+            color={'white'}
+          />
+        </TouchableWithoutFeedback>
+      )}
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  playPause: {
+  container: {
+    height: 50,
     width: 120,
-    textAlign: 'center',
-  },
-  statusContainer: {
-    height: 40,
-    width: 120,
-    marginTop: 20,
-    marginBottom: 60,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

@@ -69,7 +69,7 @@ const track3 = {
     duration: 411
 };
 
-// You can then [add](https://react-native-track-player.js.org/docs/api/functions/queue#addtracks-insertbeforeindex) the items to the queue
+// You can then [add](https://rntp.dev/docs/api/functions/queue#addtracks-insertbeforeindex) the items to the queue
 await TrackPlayer.add([track1, track2, track3]);
 ```
 
@@ -142,10 +142,9 @@ const PlayerInfo = () => {
 
     // do initial setup, set initial trackTitle..
 
-    useTrackPlayerEvents([Event.PlaybackTrackChanged], async event => {
-        if (event.type === Event.PlaybackTrackChanged && event.nextTrack != null) {
-            const track = await TrackPlayer.getTrack(event.nextTrack);
-            const {title} = track || {};
+    useTrackPlayerEvents([Event.PlaybackActiveTrackChanged], async event => {
+        if (event.type === Event.PlaybackActiveTrackChanged && event.track != null) {
+            const {title} = event.track || {};
             setTrackTitle(title);
         }
     });
