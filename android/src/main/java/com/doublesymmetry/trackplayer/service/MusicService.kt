@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.app.*
 import android.content.Intent
 import android.graphics.Bitmap
-import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.Bundle
@@ -20,7 +19,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.CacheBitmapLoader
 import androidx.media3.session.LibraryResult
 import androidx.media3.common.MediaItem
-import androidx.media3.common.Rating
 import androidx.media3.common.util.BitmapLoader
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.CommandButton
@@ -28,8 +26,8 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionCommands
 import androidx.media3.session.SessionResult
-import com.doublesymmetry.kotlinaudio.models.*
-import com.doublesymmetry.kotlinaudio.players.QueuedAudioPlayer
+import com.lovegaoshi.kotlinaudio.models.*
+import com.lovegaoshi.kotlinaudio.player.QueuedAudioPlayer
 import com.doublesymmetry.trackplayer.HeadlessJsMediaService
 import com.doublesymmetry.trackplayer.extensions.NumberExt.Companion.toMilliseconds
 import com.doublesymmetry.trackplayer.extensions.NumberExt.Companion.toSeconds
@@ -41,6 +39,7 @@ import com.doublesymmetry.trackplayer.model.Track
 import com.doublesymmetry.trackplayer.model.TrackAudioItem
 import com.doublesymmetry.trackplayer.module.MusicEvents
 import com.doublesymmetry.trackplayer.module.MusicEvents.Companion.METADATA_PAYLOAD_KEY
+import com.doublesymmetry.trackplayer.R as TrackPlayerR
 import com.doublesymmetry.trackplayer.utils.BundleUtils
 import com.doublesymmetry.trackplayer.utils.BundleUtils.setRating
 import com.doublesymmetry.trackplayer.utils.CoilBitmapLoader
@@ -55,6 +54,7 @@ import kotlinx.coroutines.flow.flow
 import timber.log.Timber
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
+import androidx.core.net.toUri
 
 @OptIn(UnstableApi::class)
 @MainThread
@@ -68,21 +68,30 @@ class MusicService : HeadlessJsMediaService() {
     var mediaTree: Map<String, List<MediaItem>> = HashMap()
     var mediaTreeStyle: List<Int> = listOf(
         MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM,
-        MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM
-    )
+        MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM)
     private var sessionCommands: SessionCommands? = null
     private var playerCommands: Player.Commands? = null
     private var customLayout: List<CommandButton> = listOf()
     private var lastWake: Long = 0
     var onStartCommandIntentValid: Boolean = true
 
-    fun acquireWakeLock() {
-        acquireWakeLockNow(this)
+    fun crossFadePrepare(previous: Boolean = false) { player.crossFadePrepare(previous) }
+
+    fun switchExoPlayer(
+        fadeDuration: Long = 2500,
+        fadeInterval: Long = 20,
+        fadeToVolume: Float = 1f
+    ) {
+        player.switchExoPlayer(
+            fadeDuration = fadeDuration,
+            fadeInterval = fadeInterval,
+            fadeToVolume = fadeToVolume)
+        emitPlaybackTrackChangedEvents(null, null, 0.0)
     }
 
-    fun abandonWakeLock() {
-        sWakeLock?.release()
-    }
+    fun acquireWakeLock() { acquireWakeLockNow(this) }
+
+    fun abandonWakeLock() { sWakeLock?.release() }
 
     fun getBitmapLoader(): BitmapLoader {
         return mediaSession.bitmapLoader
@@ -98,34 +107,29 @@ class MusicService : HeadlessJsMediaService() {
 
     @ExperimentalCoroutinesApi
     override fun onCreate() {
-        Timber.plant(object : Timber.DebugTree() {
-            override fun createStackElementTag(element: StackTraceElement): String? {
-                return "RNTP-${element.className}:${element.methodName}"
-            }
-        })
+        Timber.plant(Timber.DebugTree())
+        Timber.tag("APM").d("RNTP musicservice created.")
         fakePlayer = ExoPlayer.Builder(this).build()
         val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             // Add the Uri data so apps can identify that it was a notification click
-            data = Uri.parse("trackplayer://notification.click")
+            data = "trackplayer://notification.click".toUri()
             action = Intent.ACTION_VIEW
         }
-        mediaSession = MediaLibrarySession.Builder(this, fakePlayer,
-            InnerMediaSessionCallback()
-        )
+        mediaSession = MediaLibrarySession.Builder(this, fakePlayer, APMMediaSessionCallback() )
             .setBitmapLoader(CacheBitmapLoader(CoilBitmapLoader(this)))
             // https://github.com/androidx/media/issues/1218
-            .setSessionActivity(
-                PendingIntent.getActivity(
-                    this,
-                    0,
-                    openAppIntent,
-                    getPendingIntentFlags()
-                )
-            )
+            .setSessionActivity(PendingIntent.getActivity(this, 0, openAppIntent, getPendingIntentFlags()))
             .build()
         super.onCreate()
     }
+
+    /**
+     * Use [appKilledPlaybackBehavior] instead.
+     */
+    @Deprecated("This will be removed soon")
+    var stoppingAppPausesPlayback = true
+        private set
 
     enum class AppKilledPlaybackBehavior(val string: String) {
         CONTINUE_PLAYBACK("continue-playback"),
@@ -133,26 +137,24 @@ class MusicService : HeadlessJsMediaService() {
         STOP_PLAYBACK_AND_REMOVE_NOTIFICATION("stop-playback-and-remove-notification")
     }
 
-    private var appKilledPlaybackBehavior =
-        AppKilledPlaybackBehavior.STOP_PLAYBACK_AND_REMOVE_NOTIFICATION
+    private var appKilledPlaybackBehavior = AppKilledPlaybackBehavior.STOP_PLAYBACK_AND_REMOVE_NOTIFICATION
     private var stopForegroundGracePeriod: Int = DEFAULT_STOP_FOREGROUND_GRACE_PERIOD
 
     val tracks: List<Track>
         get() = player.items.map { (it as TrackAudioItem).track }
 
-    val currentTrack: Track?
+    val currentTrack: Track
         get() {
-            return (player.currentItem as TrackAudioItem?)?.track
+            return try {
+                (player.currentItem as TrackAudioItem).track
+            } catch (e: Exception) {
+                Track(this, Bundle(), 0)
+            }
         }
 
     val state
         get() = player.playerState
 
-    var ratingType: Int
-        get() = player.ratingType
-        set(value) {
-            player.ratingType = value
-        }
 
     val playbackError
         get() = player.playbackError
@@ -167,11 +169,12 @@ class MusicService : HeadlessJsMediaService() {
         }
 
     private var latestOptions: Bundle? = null
+    private var compactCapabilities: List<Capability> = emptyList()
     private var commandStarted = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         onStartCommandIntentValid = intent != null
-        Timber.d("onStartCommand: ${intent?.action}, ${intent?.`package`}")
+        Timber.tag("APM").d("onStartCommand: ${intent?.action}, ${intent?.`package`}")
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             // HACK: this is not supposed to be here. I definitely screwed up. but Why?
             onMediaKeyEvent(intent)
@@ -187,13 +190,14 @@ class MusicService : HeadlessJsMediaService() {
     @MainThread
     fun setupPlayer(playerOptions: Bundle?) {
         if (this::player.isInitialized) {
-            print("Player was initialized previously. Preventing reinitialization.")
+            print("Player was initialized. Prevent re-initializing again")
             return
         }
-        Timber.d("Setting up player")
-        val options = PlayerOptions(
-            alwaysShowNext = playerOptions?.getBoolean(ALWAYS_SHOW_NEXT, true) ?: true,
-            audioContentType = when (playerOptions?.getString(ANDROID_AUDIO_CONTENT_TYPE)) {
+        Timber.tag("APM").d("RNTP musicservice set up")
+        val mPlayerOptions = PlayerOptions(
+            crossfade = playerOptions?.getBoolean(CROSSFADE, false) ?: false,
+            cacheSize = playerOptions?.getDouble(MAX_CACHE_SIZE_KEY)?.toLong() ?: 0,
+            audioContentType = when(playerOptions?.getString(ANDROID_AUDIO_CONTENT_TYPE)) {
                 "music" -> C.AUDIO_CONTENT_TYPE_MUSIC
                 "speech" -> C.AUDIO_CONTENT_TYPE_SPEECH
                 "sonification" -> C.AUDIO_CONTENT_TYPE_SONIFICATION
@@ -201,22 +205,23 @@ class MusicService : HeadlessJsMediaService() {
                 "unknown" -> C.AUDIO_CONTENT_TYPE_UNKNOWN
                 else -> C.AUDIO_CONTENT_TYPE_MUSIC
             },
+            wakeMode = playerOptions?.getInt(WAKE_MODE, 0) ?: 0,
+            handleAudioBecomingNoisy = playerOptions?.getBoolean(HANDLE_NOISY, true) ?: true,
+            alwaysShowNext = playerOptions?.getBoolean(ALWAYS_SHOW_NEXT, true) ?: true,
+            handleAudioFocus = playerOptions?.getBoolean(AUTO_HANDLE_INTERRUPTIONS) ?: true,
+
             bufferOptions = BufferOptions(
                 playerOptions?.getDouble(MIN_BUFFER_KEY)?.toMilliseconds()?.toInt(),
                 playerOptions?.getDouble(MAX_BUFFER_KEY)?.toMilliseconds()?.toInt(),
                 playerOptions?.getDouble(PLAY_BUFFER_KEY)?.toMilliseconds()?.toInt(),
                 playerOptions?.getDouble(BACK_BUFFER_KEY)?.toMilliseconds()?.toInt(),
             ),
-            cacheSize = playerOptions?.getDouble(MAX_CACHE_SIZE_KEY)?.toLong() ?: 0,
-            handleAudioBecomingNoisy = playerOptions?.getBoolean(HANDLE_NOISY, true) ?: true,
-            handleAudioFocus = playerOptions?.getBoolean(AUTO_HANDLE_INTERRUPTIONS) ?: true,
-            interceptPlayerActionsTriggeredExternally = true,
-            skipSilence = playerOptions?.getBoolean(SKIP_SILENCE) ?: false,
-            wakeMode = playerOptions?.getInt(WAKE_MODE, 0) ?: 0
+
+            skipSilence = playerOptions?.getBoolean(SKIP_SILENCE) ?: false
         )
-        player = QueuedAudioPlayer(this@MusicService, options)
+        player = QueuedAudioPlayer(this@MusicService, mPlayerOptions)
         fakePlayer.release()
-        mediaSession.player = player.exoPlayer
+        mediaSession.player = player.player
         observeEvents()
     }
 
@@ -225,6 +230,9 @@ class MusicService : HeadlessJsMediaService() {
         latestOptions = options
         val androidOptions = options.getBundle(ANDROID_OPTIONS_KEY)
 
+        if (androidOptions?.containsKey(PARSE_EMBEDDED_ARTWORK) == true) {
+            player.parseEmbeddedArtwork = androidOptions.getBoolean(PARSE_EMBEDDED_ARTWORK)
+        }
         if (androidOptions?.containsKey(AUDIO_OFFLOAD_KEY) == true) {
             player.setAudioOffload(androidOptions.getBoolean(AUDIO_OFFLOAD_KEY))
         }
@@ -233,43 +241,37 @@ class MusicService : HeadlessJsMediaService() {
         }
 
         appKilledPlaybackBehavior =
-            AppKilledPlaybackBehavior::string.find(
-                androidOptions?.getString(
-                    APP_KILLED_PLAYBACK_BEHAVIOR_KEY
-                )
-            ) ?: AppKilledPlaybackBehavior.CONTINUE_PLAYBACK
+            AppKilledPlaybackBehavior::string.find(androidOptions?.getString(APP_KILLED_PLAYBACK_BEHAVIOR_KEY)) ?:
+                    AppKilledPlaybackBehavior.CONTINUE_PLAYBACK
 
-        BundleUtils.getIntOrNull(androidOptions, STOP_FOREGROUND_GRACE_PERIOD_KEY)
-            ?.let { stopForegroundGracePeriod = it }
+        BundleUtils.getIntOrNull(androidOptions, STOP_FOREGROUND_GRACE_PERIOD_KEY)?.let { stopForegroundGracePeriod = it }
 
-        player.alwaysPauseOnInterruption =
-            androidOptions?.getBoolean(PAUSE_ON_INTERRUPTION_KEY) ?: false
+        // TODO: This handles a deprecated flag. Should be removed soon.
+        options.getBoolean(STOPPING_APP_PAUSES_PLAYBACK_KEY).let {
+            stoppingAppPausesPlayback = options.getBoolean(STOPPING_APP_PAUSES_PLAYBACK_KEY)
+            if (stoppingAppPausesPlayback) {
+                appKilledPlaybackBehavior = AppKilledPlaybackBehavior.PAUSE_PLAYBACK
+            }
+        }
+
+        player.alwaysPauseOnInterruption = androidOptions?.getBoolean(PAUSE_ON_INTERRUPTION_KEY) ?: false
         player.shuffleMode = androidOptions?.getBoolean(SHUFFLE_KEY) ?: false
 
         // setup progress update events if configured
         progressUpdateJob?.cancel()
-        val updateInterval =
-            BundleUtils.getDoubleOrNull(options, PROGRESS_UPDATE_EVENT_INTERVAL_KEY)
+        val updateInterval = BundleUtils.getDoubleOrNull(options, PROGRESS_UPDATE_EVENT_INTERVAL_KEY)
         if (updateInterval != null && updateInterval > 0) {
             progressUpdateJob = scope.launch {
-                progressUpdateEventFlow(updateInterval).collect {
-                    emit(
-                        MusicEvents.PLAYBACK_PROGRESS_UPDATED,
-                        it
-                    )
-                }
+                progressUpdateEventFlow(updateInterval).collect { emit(MusicEvents.PLAYBACK_PROGRESS_UPDATED, it) }
             }
         }
-        val capabilities =
-            options.getIntegerArrayList("capabilities")?.map { Capability.entries[it] }
-                ?: emptyList()
-        var notificationCapabilities = (
-                options.getIntegerArrayList("notificationCapabilities")
-                    ?: options.getIntegerArrayList("compactCapabilities"))
-            ?.map { Capability.entries[it] } ?: emptyList()
-        if (notificationCapabilities.isEmpty()) notificationCapabilities = capabilities
 
+        val capabilities = options.getIntegerArrayList("capabilities")?.map { Capability.entries[it] } ?: emptyList()
+        var notificationCapabilities = options.getIntegerArrayList("notificationCapabilities")?.map { Capability.entries[it] } ?: emptyList()
+        compactCapabilities = options.getIntegerArrayList("compactCapabilities")?.map { Capability.entries[it] } ?: emptyList()
         val customActions = options.getBundle(CUSTOM_ACTIONS_KEY)
+        val customActionsList = customActions?.getStringArrayList(CUSTOM_ACTIONS_LIST_KEY)
+        if (notificationCapabilities.isEmpty()) notificationCapabilities = capabilities
 
         val playerCommandsBuilder = Player.Commands.Builder().addAll(
             // HACK: without COMMAND_GET_CURRENT_MEDIA_ITEM, notification cannot be created
@@ -285,30 +287,52 @@ class MusicService : HeadlessJsMediaService() {
             Player.COMMAND_SET_MEDIA_ITEM,
             Player.COMMAND_PREPARE,
             Player.COMMAND_RELEASE,
+            Player.COMMAND_CHANGE_MEDIA_ITEMS,
         )
         notificationCapabilities.forEach {
             when (it) {
                 Capability.PLAY, Capability.PAUSE -> {
                     playerCommandsBuilder.add(Player.COMMAND_PLAY_PAUSE)
                 }
-
                 Capability.STOP -> {
                     playerCommandsBuilder.add(Player.COMMAND_STOP)
                 }
-
+                Capability.SKIP_TO_NEXT -> {
+                    playerCommandsBuilder.add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    playerCommandsBuilder.add(Player.COMMAND_SEEK_TO_NEXT)
+                }
+                Capability.SKIP_TO_PREVIOUS -> {
+                    playerCommandsBuilder.add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                    playerCommandsBuilder.add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                }
+                Capability.JUMP_FORWARD -> {
+                    playerCommandsBuilder.add(Player.COMMAND_SEEK_FORWARD)
+                }
+                Capability.JUMP_BACKWARD -> {
+                    playerCommandsBuilder.add(Player.COMMAND_SEEK_BACK)
+                }
                 Capability.SEEK_TO -> {
                     playerCommandsBuilder.add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
                 }
-
-                else -> {}
+                else -> { }
             }
         }
-        customLayout = CustomCommandButton.entries
-            .filter { notificationCapabilities.contains(it.capability) }
-            .map { c -> c.commandButton }
-        val sessionCommandsBuilder =
-            MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
-        customLayout.forEach { v ->
+        customLayout = customActionsList?.map {
+                v -> CustomButton(
+            displayName = v,
+            sessionCommand = v,
+            iconRes = BundleUtils.getCustomIcon(
+                this,
+                customActions,
+                v,
+                TrackPlayerR.drawable.ifl_24px
+            )
+        ).commandButton
+        } ?: ImmutableList.of()
+
+        val sessionCommandsBuilder = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
+        customLayout.forEach {
+                v ->
             v.sessionCommand?.let { sessionCommandsBuilder.add(it) }
         }
 
@@ -323,7 +347,7 @@ class MusicService : HeadlessJsMediaService() {
             )
             mediaSession.setAvailableCommands(
                 mediaSession.mediaNotificationControllerInfo!!,
-                sessionCommandsBuilder.build(),
+                sessionCommands!!,
                 playerCommands!!
             )
         }
@@ -377,7 +401,7 @@ class MusicService : HeadlessJsMediaService() {
 
     @MainThread
     fun move(fromIndex: Int, toIndex: Int) {
-        player.move(fromIndex, toIndex);
+        player.move(fromIndex, toIndex)
     }
 
     @MainThread
@@ -462,6 +486,14 @@ class MusicService : HeadlessJsMediaService() {
     }
 
     @MainThread
+    fun getPitch(): Float = player.playbackPitch
+
+    @MainThread
+    fun setPitch(value: Float) {
+        player.playbackPitch = value
+    }
+
+    @MainThread
     fun getRepeatMode(): RepeatMode = player.repeatMode
 
     @MainThread
@@ -477,6 +509,44 @@ class MusicService : HeadlessJsMediaService() {
         player.volume = value
     }
 
+    @MainThread
+    fun setAnimatedVolume(value: Float, duration: Long = 500L, interval: Long = 20L, emitEventMsg: String = ""): Deferred<Unit> {
+        val eventMsgBundle = Bundle()
+        eventMsgBundle.putString(DATA_KEY, emitEventMsg)
+        return player.fadeVolume(value, duration, interval) {
+            emit(
+                MusicEvents.PLAYBACK_ANIMATED_VOLUME_CHANGED,
+                eventMsgBundle
+            )
+        }
+    }
+
+    fun fadeOutPause (duration: Long = 500L, interval: Long = 20L) {
+        player.fadeVolume(0f, duration, interval) {
+            player.pause()
+        }
+    }
+
+    fun fadeOutNext (duration: Long = 500L, interval: Long = 20L, toVolume: Float = 1f) {
+        player.fadeVolume(0f, duration, interval) {
+            player.next()
+            player.fadeVolume(toVolume, duration, interval)
+        }
+    }
+
+    fun fadeOutPrevious (duration: Long = 500L, interval: Long = 20L, toVolume: Float = 1f) {
+        player.fadeVolume(0f, duration, interval) {
+            player.previous()
+            player.fadeVolume(toVolume, duration, interval)
+        }
+    }
+
+    fun fadeOutJump (index: Int, duration: Long = 500L, interval: Long = 20L, toVolume: Float = 1f) {
+        player.fadeVolume(0f, duration, interval) {
+            player.jumpToItem(index)
+            player.fadeVolume(toVolume, duration, interval)
+        }
+    }
     @MainThread
     fun getDurationInSeconds(): Double = player.duration.toSeconds()
 
@@ -497,34 +567,47 @@ class MusicService : HeadlessJsMediaService() {
     }
 
     @MainThread
-    fun updateMetadataForTrack(index: Int, bundle: Bundle) {
-        tracks[index].let { currentTrack ->
-            currentTrack.setMetadata(reactContext, bundle, 0)
-
-            player.replaceItem(index, currentTrack.toAudioItem())
-        }
+    fun updateMetadataForTrack(index: Int, track: Track) {
+        player.replaceItem(index, track.toAudioItem())
     }
 
     @MainThread
-    fun updateNowPlayingMetadata(bundle: Bundle) {
-        updateMetadataForTrack(player.currentIndex, bundle)
+    fun updateNowPlayingMetadata(track: Track) {
+        updateMetadataForTrack(player.currentIndex, track)
+    }
+
+    @MainThread
+    fun clearNotificationMetadata() {
     }
 
     private fun emitPlaybackTrackChangedEvents(
+        index: Int?,
         previousIndex: Int?,
         oldPosition: Double
     ) {
-        val bundle = Bundle()
-        bundle.putDouble("lastPosition", oldPosition)
+        val a = Bundle()
+        a.putDouble(POSITION_KEY, oldPosition)
+        if (index != null) {
+            a.putInt(NEXT_TRACK_KEY, index)
+        }
+
+        if (previousIndex != null) {
+            a.putInt(TRACK_KEY, previousIndex)
+        }
+
+        emit(MusicEvents.PLAYBACK_TRACK_CHANGED, a)
+
+        val b = Bundle()
+        b.putDouble("lastPosition", oldPosition)
         if (tracks.isNotEmpty()) {
-            bundle.putInt("index", player.currentIndex)
-            bundle.putBundle("track", tracks[player.currentIndex].originalItem)
+            b.putInt("index", player.currentIndex)
+            b.putBundle("track", tracks[player.currentIndex].originalItem)
             if (previousIndex != null) {
-                bundle.putInt("lastIndex", previousIndex)
-                bundle.putBundle("lastTrack", tracks[previousIndex].originalItem)
+                b.putInt("lastIndex", previousIndex)
+                b.putBundle("lastTrack", tracks[previousIndex].originalItem)
             }
         }
-        emit(MusicEvents.PLAYBACK_ACTIVE_TRACK_CHANGED, bundle)
+        emit(MusicEvents.PLAYBACK_ACTIVE_TRACK_CHANGED, b)
     }
 
     private fun emitQueueEndedEvent() {
@@ -532,6 +615,18 @@ class MusicService : HeadlessJsMediaService() {
         bundle.putInt(TRACK_KEY, player.currentIndex)
         bundle.putDouble(POSITION_KEY, player.position.toSeconds())
         emit(MusicEvents.PLAYBACK_QUEUE_ENDED, bundle)
+    }
+
+    @Suppress("DEPRECATION")
+    fun isForegroundService(): Boolean {
+        val manager = baseContext.getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        for (service in manager.getRunningServices(Int.MAX_VALUE)) {
+            if (MusicService::class.java.name == service.service.className) {
+                return service.foreground
+            }
+        }
+        Timber.e("isForegroundService found no matching service")
+        return false
     }
 
     @MainThread
@@ -550,6 +645,7 @@ class MusicService : HeadlessJsMediaService() {
             event.audioItemTransition.collect {
                 if (it !is AudioItemTransitionReason.REPEAT) {
                     emitPlaybackTrackChangedEvents(
+                        player.currentIndex,
                         player.previousIndex,
                         (it?.oldPosition ?: 0).toSeconds()
                     )
@@ -576,14 +672,12 @@ class MusicService : HeadlessJsMediaService() {
                             emit(MusicEvents.BUTTON_SET_RATING, this)
                         }
                     }
-
                     is MediaSessionCallback.SEEK -> {
                         Bundle().apply {
                             putDouble("position", it.positionMs.toSeconds())
                             emit(MusicEvents.BUTTON_SEEK_TO, this)
                         }
                     }
-
                     MediaSessionCallback.PLAY -> emit(MusicEvents.BUTTON_PLAY)
                     MediaSessionCallback.PAUSE -> emit(MusicEvents.BUTTON_PAUSE)
                     MediaSessionCallback.NEXT -> emit(MusicEvents.BUTTON_SKIP_NEXT)
@@ -591,23 +685,25 @@ class MusicService : HeadlessJsMediaService() {
                     MediaSessionCallback.STOP -> emit(MusicEvents.BUTTON_STOP)
                     MediaSessionCallback.FORWARD -> {
                         Bundle().apply {
-                            val interval = latestOptions?.getDouble(
-                                FORWARD_JUMP_INTERVAL_KEY,
-                                DEFAULT_JUMP_INTERVAL
-                            ) ?: DEFAULT_JUMP_INTERVAL
+                            val interval = latestOptions?.getDouble(FORWARD_JUMP_INTERVAL_KEY, DEFAULT_JUMP_INTERVAL) ?:
+                            DEFAULT_JUMP_INTERVAL
                             putInt("interval", interval.toInt())
                             emit(MusicEvents.BUTTON_JUMP_FORWARD, this)
                         }
                     }
-
                     MediaSessionCallback.REWIND -> {
                         Bundle().apply {
-                            val interval = latestOptions?.getDouble(
-                                BACKWARD_JUMP_INTERVAL_KEY,
-                                DEFAULT_JUMP_INTERVAL
-                            ) ?: DEFAULT_JUMP_INTERVAL
+                            val interval = latestOptions?.getDouble(BACKWARD_JUMP_INTERVAL_KEY, DEFAULT_JUMP_INTERVAL) ?:
+                            DEFAULT_JUMP_INTERVAL
                             putInt("interval", interval.toInt())
                             emit(MusicEvents.BUTTON_JUMP_BACKWARD, this)
+                        }
+                    }
+
+                    is MediaSessionCallback.CUSTOMACTION -> {
+                        Bundle().apply {
+                            putString("customAction", it.customAction)
+                            emit(MusicEvents.BUTTON_CUSTOM_ACTION, this)
                         }
                     }
                 }
@@ -703,7 +799,7 @@ class MusicService : HeadlessJsMediaService() {
     @MainThread
     override fun onBind(intent: Intent?): IBinder? {
         val intentAction = intent?.action
-        Timber.d("intentAction = $intentAction")
+        Timber.tag("APM").d("onbind: $intentAction")
         return if (intentAction != null) {
             super.onBind(intent)
         } else {
@@ -712,8 +808,7 @@ class MusicService : HeadlessJsMediaService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        val intentAction = intent?.action
-        Timber.d("intentAction = $intentAction")
+        Timber.tag("APM").d("unbind: ${intent?.action}")
         return super.onUnbind(intent)
     }
 
@@ -725,19 +820,18 @@ class MusicService : HeadlessJsMediaService() {
     @MainThread
     override fun onTaskRemoved(rootIntent: Intent?) {
         onUnbind(rootIntent)
-        Timber.d("isInitialized = ${::player.isInitialized}, appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
+        Timber
+            .tag("APM")
+            .d("onTaskRemoved: ${::player.isInitialized}, $appKilledPlaybackBehavior")
         if (!::player.isInitialized) {
             mediaSession.release()
             return
         }
 
         when (appKilledPlaybackBehavior) {
-            AppKilledPlaybackBehavior.PAUSE_PLAYBACK -> {
-                Timber.d("Pausing playback - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
-                player.pause()
-            }
+            AppKilledPlaybackBehavior.PAUSE_PLAYBACK -> player.pause()
             AppKilledPlaybackBehavior.STOP_PLAYBACK_AND_REMOVE_NOTIFICATION -> {
-                Timber.d("Killing service - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
+                Timber.tag("APM").d("onTaskRemoved: Killing service")
                 mediaSession.release()
                 player.clear()
                 player.stop()
@@ -756,7 +850,6 @@ class MusicService : HeadlessJsMediaService() {
                 stopSelf()
                 exitProcess(0)
             }
-
             else -> {}
         }
     }
@@ -775,14 +868,13 @@ class MusicService : HeadlessJsMediaService() {
             }
             lastWake = currentTime
             val activityIntent = packageManager.getLaunchIntentForPackage(packageName)
-            activityIntent!!.data = Uri.parse("trackplayer://service-bound")
+            activityIntent!!.data = "trackplayer://service-bound".toUri()
             activityIntent.action = Intent.ACTION_VIEW
             activityIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             var activityOptions = ActivityOptions.makeBasic()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 activityOptions = activityOptions.setPendingIntentBackgroundActivityStartMode(
-                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-                )
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
             }
             this.startActivity(activityIntent, activityOptions.toBundle())
             return true
@@ -791,14 +883,15 @@ class MusicService : HeadlessJsMediaService() {
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession {
-        Timber.d("${controllerInfo.packageName}")
+        Timber.tag("APM").d("onGetSession: ${controllerInfo.packageName}")
         return mediaSession
     }
 
     fun notifyChildrenChanged() {
-        mediaSession.connectedControllers.forEach { controller ->
-            mediaTree.forEach { it ->
-                mediaSession.notifyChildrenChanged(controller, it.key, it.value.size, null)
+        mediaSession.connectedControllers.forEach {
+                controller ->
+            mediaTree.forEach {
+                    it -> mediaSession.notifyChildrenChanged(controller, it.key, it.value.size, null)
             }
 
         }
@@ -811,8 +904,8 @@ class MusicService : HeadlessJsMediaService() {
 
     @MainThread
     override fun onDestroy() {
+        Timber.tag("APM").d("RNTP service is destroyed.")
         if (::player.isInitialized) {
-            Timber.d("Releasing media session and destroying player")
             mediaSession.release()
             player.destroy()
         }
@@ -834,42 +927,34 @@ class MusicService : HeadlessJsMediaService() {
                     emit(MusicEvents.BUTTON_PLAY_PAUSE)
                     true
                 }
-
                 KeyEvent.KEYCODE_MEDIA_STOP -> {
                     emit(MusicEvents.BUTTON_STOP)
                     true
                 }
-
                 KeyEvent.KEYCODE_MEDIA_PAUSE -> {
                     emit(MusicEvents.BUTTON_PAUSE)
                     true
                 }
-
                 KeyEvent.KEYCODE_MEDIA_PLAY -> {
                     emit(MusicEvents.BUTTON_PLAY)
                     true
                 }
-
                 KeyEvent.KEYCODE_MEDIA_NEXT -> {
                     emit(MusicEvents.BUTTON_SKIP_NEXT)
                     true
                 }
-
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
                     emit(MusicEvents.BUTTON_SKIP_PREVIOUS)
                     true
                 }
-
                 KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD, KeyEvent.KEYCODE_MEDIA_STEP_FORWARD -> {
                     emit(MusicEvents.BUTTON_JUMP_FORWARD)
                     true
                 }
-
                 KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD, KeyEvent.KEYCODE_MEDIA_STEP_BACKWARD -> {
                     emit(MusicEvents.BUTTON_JUMP_BACKWARD)
                     true
                 }
-
                 else -> null
             }
         }
@@ -881,14 +966,12 @@ class MusicService : HeadlessJsMediaService() {
         val service = this@MusicService
     }
 
-    private inner class InnerMediaSessionCallback : MediaLibrarySession.Callback {
+    private inner class APMMediaSessionCallback: MediaLibrarySession.Callback {
         // HACK: I'm sure most of the callbacks were not implemented correctly.
         // ATM I only care that andorid auto still functions.
 
-        private val rootItem =
-            buildMediaItem(title = "root", mediaId = AA_ROOT_KEY, isPlayable = false)
-        private val forYouItem =
-            buildMediaItem(title = "For You", mediaId = AA_FOR_YOU_KEY, isPlayable = false)
+        private val rootItem = buildMediaItem(title = "root", mediaId = AA_ROOT_KEY, isPlayable = false)
+        private val forYouItem = buildMediaItem(title = "For You", mediaId = AA_FOR_YOU_KEY, isPlayable = false)
 
         override fun onDisconnected(
             session: MediaSession,
@@ -899,14 +982,13 @@ class MusicService : HeadlessJsMediaService() {
             })
             super.onDisconnected(session, controller)
         }
-
         // Configure commands available to the controller in onConnect()
         @OptIn(UnstableApi::class)
         override fun onConnect(
             session: MediaSession,
             controller: MediaSession.ControllerInfo
         ): MediaSession.ConnectionResult {
-            Timber.d("${controller.packageName}")
+            Timber.tag("APM").d("connection via: ${controller.packageName}")
             val isMediaNotificationController = session.isMediaNotificationController(controller)
             val isAutomotiveController = session.isAutomotiveController(controller)
             val isAutoCompanionController = session.isAutoCompanionController(controller)
@@ -922,8 +1004,7 @@ class MusicService : HeadlessJsMediaService() {
                     "com.example.android.mediacontroller",
                     // Android Auto
                     "com.google.android.projection.gearhead"
-                )
-            ) {
+                )) {
                 // HACK: attempt to wake up activity (for legacy APM). if not, start headless.
                 if (!selfWake(controller.packageName)) {
                     onStartCommand(null, 0, 0)
@@ -936,13 +1017,8 @@ class MusicService : HeadlessJsMediaService() {
             ) {
                 MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                     .setCustomLayout(customLayout)
-                    .setAvailableSessionCommands(
-                        sessionCommands
-                            ?: MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
-                    )
-                    .setAvailablePlayerCommands(
-                        playerCommands ?: MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
-                    )
+                    .setAvailableSessionCommands(sessionCommands ?: MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS)
+                    .setAvailablePlayerCommands(playerCommands ?: MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS)
                     .build()
             } else {
                 super.onConnect(session, controller)
@@ -952,18 +1028,11 @@ class MusicService : HeadlessJsMediaService() {
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
-            command: SessionCommand,
+            customCommand: SessionCommand,
             args: Bundle
         ): ListenableFuture<SessionResult> {
-            player.forwardingPlayer.let {
-                when (command.customAction) {
-                    CustomCommandButton.JUMP_BACKWARD.customAction -> { it.seekBack() }
-                    CustomCommandButton.JUMP_FORWARD.customAction -> { it.seekForward() }
-                    CustomCommandButton.NEXT.customAction -> { it.seekToNext() }
-                    CustomCommandButton.PREVIOUS.customAction -> { it.seekToPrevious() }
-                }
-            }
-            return super.onCustomCommand(session, controller, command, args)
+            emit(MusicEvents.BUTTON_CUSTOM_ACTION, Bundle().apply { putString("customAction", customCommand.customAction) })
+            return super.onCustomCommand(session, controller, customCommand, args)
         }
 
         override fun onGetLibraryRoot(
@@ -971,19 +1040,18 @@ class MusicService : HeadlessJsMediaService() {
             browser: MediaSession.ControllerInfo,
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<MediaItem>> {
-            Timber.d("${browser.packageName}")
             val rootExtras = Bundle().apply {
                 putBoolean("android.media.browse.CONTENT_STYLE_SUPPORTED", true)
                 putInt("android.media.browse.CONTENT_STYLE_BROWSABLE_HINT", mediaTreeStyle[0])
-                putInt("android.media.browse.CONTENT_STYLE_PLAYABLE_HINT", mediaTreeStyle[1])
+                putInt("android.media.browse.CONTENT_STYLE_PLAYABLE_HINT",  mediaTreeStyle[1])
             }
             val libraryParams = LibraryParams.Builder().setExtras(rootExtras).build()
+            Timber.tag("APM").d("acquiring root: ${browser.packageName}")
             // https://github.com/androidx/media/issues/1731#issuecomment-2411109462
             val mRootItem = when (browser.packageName) {
                 "com.google.android.googlequicksearchbox" -> {
                     if (mediaTree[AA_FOR_YOU_KEY] == null) rootItem else forYouItem
                 }
-
                 else -> rootItem
             }
             return Futures.immediateFuture(LibraryResult.ofItem(mRootItem, libraryParams))
@@ -997,13 +1065,8 @@ class MusicService : HeadlessJsMediaService() {
             pageSize: Int,
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
-            emit(MusicEvents.BUTTON_BROWSE, Bundle().apply { putString("mediaId", parentId) });
-            return Futures.immediateFuture(
-                LibraryResult.ofItemList(
-                    mediaTree[parentId] ?: listOf(),
-                    null
-                )
-            )
+            emit(MusicEvents.BUTTON_BROWSE, Bundle().apply { putString("mediaId", parentId) })
+            return Futures.immediateFuture(LibraryResult.ofItemList(mediaTree[parentId] ?: listOf(), null))
         }
 
         override fun onGetItem(
@@ -1011,7 +1074,7 @@ class MusicService : HeadlessJsMediaService() {
             browser: MediaSession.ControllerInfo,
             mediaId: String
         ): ListenableFuture<LibraryResult<MediaItem>> {
-            Timber.d("${browser.packageName}, mediaId = $mediaId")
+            Timber.tag("APM").d("acquiring item: ${browser.packageName}, $mediaId")
             // emit(MusicEvents.BUTTON_PLAY_FROM_ID, Bundle().apply { putString("id", mediaId) })
             return Futures.immediateFuture(LibraryResult.ofItem(rootItem, null))
         }
@@ -1022,7 +1085,7 @@ class MusicService : HeadlessJsMediaService() {
             query: String,
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<Void>> {
-            Timber.d("${browser.packageName}, query = $query")
+            Timber.tag("APM").d("searching: ${browser.packageName}, $query")
             return super.onSearch(session, browser, query, params)
         }
 
@@ -1031,7 +1094,8 @@ class MusicService : HeadlessJsMediaService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>
         ): ListenableFuture<MutableList<MediaItem>> {
-            Timber.d("${controller.packageName}, ${mediaItems[0].mediaId}, ${mediaItems.size}")
+            Timber.tag("APM")
+                .d("addMediaItem: ${controller.packageName}, ${mediaItems[0].mediaId}, ${mediaItems.size}")
             return super.onAddMediaItems(mediaSession, controller, mediaItems)
         }
 
@@ -1042,7 +1106,7 @@ class MusicService : HeadlessJsMediaService() {
             startIndex: Int,
             startPositionMs: Long
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
-            Timber.d("${controller.packageName}, ${mediaItems[0].toBundle()}")
+            Timber.tag("APM").d("setMediaItem: ${controller.packageName}, ${mediaItems[0].toBundle()}")
             if (mediaItems[0].requestMetadata.searchQuery == null) {
                 emit(MusicEvents.BUTTON_PLAY_FROM_ID, Bundle().apply {
                     putString("id", mediaItems[0].mediaId)
@@ -1066,11 +1130,7 @@ class MusicService : HeadlessJsMediaService() {
             controllerInfo: MediaSession.ControllerInfo,
             intent: Intent
         ): Boolean {
-            return onMediaKeyEvent(intent) ?: super.onMediaButtonEvent(
-                session,
-                controllerInfo,
-                intent
-            )
+            return onMediaKeyEvent(intent) ?: super.onMediaButtonEvent(session, controllerInfo, intent)
         }
 
         override fun onGetSearchResult(
@@ -1081,7 +1141,7 @@ class MusicService : HeadlessJsMediaService() {
             pageSize: Int,
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
-            Timber.d("${browser.packageName}, $query")
+            Timber.tag("APM").d("searching2: ${browser.packageName}, $query")
             return super.onGetSearchResult(session, browser, query, page, pageSize, params)
         }
 
@@ -1094,18 +1154,6 @@ class MusicService : HeadlessJsMediaService() {
             })
             return super.onPlaybackResumption(mediaSession, controller)
         }
-
-        override fun onSetRating(
-            session: MediaSession,
-            controller: MediaSession.ControllerInfo,
-            rating: Rating
-        ): ListenableFuture<SessionResult> {
-            Bundle().apply {
-                setRating(this, "rating", rating)
-                emit(MusicEvents.BUTTON_SET_RATING, this)
-            }
-            return super.onSetRating(session, controller, rating)
-        }
     }
 
     private fun getPendingIntentFlags(): Int {
@@ -1115,7 +1163,7 @@ class MusicService : HeadlessJsMediaService() {
     companion object {
         const val EMPTY_NOTIFICATION_ID = 1
         const val STATE_KEY = "state"
-        const val ERROR_KEY = "error"
+        const val ERROR_KEY  = "error"
         const val EVENT_KEY = "event"
         const val DATA_KEY = "data"
         const val TRACK_KEY = "track"
@@ -1140,7 +1188,9 @@ class MusicService : HeadlessJsMediaService() {
         const val ANDROID_OPTIONS_KEY = "android"
 
         const val CUSTOM_ACTIONS_KEY = "customActions"
+        const val CUSTOM_ACTIONS_LIST_KEY = "customActionsList"
 
+        const val STOPPING_APP_PAUSES_PLAYBACK_KEY = "stoppingAppPausesPlayback"
         const val APP_KILLED_PLAYBACK_BEHAVIOR_KEY = "appKilledPlaybackBehavior"
         const val AUDIO_OFFLOAD_KEY = "audioOffload"
         const val SHUFFLE_KEY = "shuffle"
@@ -1152,6 +1202,7 @@ class MusicService : HeadlessJsMediaService() {
         const val IS_FOCUS_LOSS_PERMANENT_KEY = "permanent"
         const val IS_PAUSED_KEY = "paused"
 
+        const val PARSE_EMBEDDED_ARTWORK = "androidParseEmbeddedArtwork"
         const val HANDLE_NOISY = "androidHandleAudioBecomingNoisy"
         const val CROSSFADE = "crossfade"
         const val ALWAYS_SHOW_NEXT = "androidAlwaysShowNext"
@@ -1165,3 +1216,4 @@ class MusicService : HeadlessJsMediaService() {
         const val DEFAULT_STOP_FOREGROUND_GRACE_PERIOD = 5
     }
 }
+

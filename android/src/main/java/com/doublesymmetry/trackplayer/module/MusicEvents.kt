@@ -35,16 +35,19 @@ class MusicEvents(private val reactContext: ReactContext) : BroadcastReceiver() 
         const val BUTTON_JUMP_BACKWARD = "remote-jump-backward"
         const val BUTTON_DUCK = "remote-duck"
         const val BUTTON_BROWSE = "remote-browse"
+        const val BUTTON_CUSTOM_ACTION = "remote-custom-action"
 
         // Playback Events
         const val PLAYBACK_PLAY_WHEN_READY_CHANGED = "playback-play-when-ready-changed"
         const val PLAYBACK_STATE = "playback-state"
+        const val PLAYBACK_TRACK_CHANGED = "playback-track-changed"
         const val PLAYBACK_ACTIVE_TRACK_CHANGED = "playback-active-track-changed"
         const val PLAYBACK_QUEUE_ENDED = "playback-queue-ended"
         const val PLAYBACK_METADATA = "playback-metadata-received"
         const val PLAYBACK_PROGRESS_UPDATED = "playback-progress-updated"
         const val PLAYBACK_ERROR = "playback-error"
-        const val PLAYBACK_RESUME = "android-playback-resume"
+        const val PLAYBACK_ANIMATED_VOLUME_CHANGED = "playback-animated-volume-changed"
+        const val PLAYBACK_RESUME = "playback-resume-android"
 
         // Metadata Events
         const val METADATA_CHAPTER_RECEIVED = "metadata-chapter-received"
